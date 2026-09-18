@@ -131,6 +131,9 @@ static inline bool p_equ(const char *s1, const char *s2) { return std::strcmp(s1
 #define P_STEP_WIDTH        "step_width"
 #define P_STEP_GAP          "step_gap"
 #define P_MIN_BAR_HEIGHT    "min_bar_height"
+#define P_BAND_AGGREGATION  "band_aggregation"
+#define P_BAND_AVERAGE      "band_average"
+#define P_BAND_PEAK         "band_peak"
 
 #define P_AUDIO_SYNC_OFFSET "audio_sync_offset"
 
@@ -155,3 +158,4 @@ static inline bool p_equ(const char *s1, const char *s2) { return std::strcmp(s1
 #define P_IGNORE_MUTE_DESC  "ignore_mute_desc"
 #define P_LARGE_FFT_DESC    "large_fft_desc"
 #define P_AUDIO_SYNC_DESC   "audio_sync_desc"
+#define P_BAND_AGG_DESC     "band_aggregation_desc"

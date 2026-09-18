@@ -163,6 +163,7 @@ namespace callbacks {
         obs_data_set_default_int(settings, P_STEP_WIDTH, 8);
         obs_data_set_default_int(settings, P_STEP_GAP, 4);
         obs_data_set_default_int(settings, P_MIN_BAR_HEIGHT, 0);
+        obs_data_set_default_string(settings, P_BAND_AGGREGATION, P_BAND_AVERAGE);
         obs_data_set_default_int(settings, P_METER_BUF, 150);
         obs_data_set_default_bool(settings, P_RMS_MODE, true);
         obs_data_set_default_bool(settings, P_HIDE_SILENT, false);
@@ -230,6 +231,10 @@ namespace callbacks {
         obs_properties_add_int(props, P_STEP_WIDTH, T(P_STEP_WIDTH), 1, 256, 1);
         obs_properties_add_int(props, P_STEP_GAP, T(P_STEP_GAP), 0, 256, 1);
         obs_properties_add_int(props, P_MIN_BAR_HEIGHT, T(P_MIN_BAR_HEIGHT), 0, 1080, 1);
+        auto band_aggregation = obs_properties_add_list(props, P_BAND_AGGREGATION, T(P_BAND_AGGREGATION), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+        obs_property_list_add_string(band_aggregation, T(P_BAND_AVERAGE), P_BAND_AVERAGE);
+        obs_property_list_add_string(band_aggregation, T(P_BAND_PEAK), P_BAND_PEAK);
+        obs_property_set_long_description(band_aggregation, T(P_BAND_AGG_DESC));
         obs_property_set_modified_callback(displaylist, [](obs_properties_t *props, [[maybe_unused]] obs_property_t *property, obs_data_t *settings) -> bool {
             auto disp = obs_data_get_string(settings, P_DISPLAY_MODE);
             auto meter = p_equ(disp, P_LEVEL_METER);
@@ -243,6 +248,7 @@ namespace callbacks {
             set_prop_visible(props, P_STEP_WIDTH, step);
             set_prop_visible(props, P_STEP_GAP, step);
             set_prop_visible(props, P_MIN_BAR_HEIGHT, bar || step);
+            set_prop_visible(props, P_BAND_AGGREGATION, p_equ(disp, P_BARS) || p_equ(disp, P_STEP_BARS));
             set_prop_visible(props, P_CAPS, bar);
             obs_property_list_item_disable(obs_properties_get(props, P_RENDER_MODE), 0, !curve && !waveform);
             obs_property_list_item_disable(obs_properties_get(props, P_PULSE_MODE), 1, !curve && !p_equ(disp, P_BARS) && !p_equ(disp, P_STEP_BARS));
@@ -541,6 +547,7 @@ void WAVSource::get_settings(obs_data_t *settings)
     m_range_middle = (int)obs_data_get_int(settings, P_RANGE_MIDDLE);
     m_range_crest = (int)obs_data_get_int(settings, P_RANGE_CREST);
     auto display = obs_data_get_string(settings, P_DISPLAY_MODE);
+    auto band_aggregation = obs_data_get_string(settings, P_BAND_AGGREGATION);
     m_bar_width = (int)obs_data_get_int(settings, P_BAR_WIDTH);
     m_bar_gap = (int)obs_data_get_int(settings, P_BAR_GAP);
     m_step_width = (int)obs_data_get_int(settings, P_STEP_WIDTH);
@@ -554,6 +561,8 @@ void WAVSource::get_settings(obs_data_t *settings)
     m_volume_target = (float)obs_data_get_int(settings, P_VOLUME_TARGET);
     m_max_gain = (float)obs_data_get_int(settings, P_MAX_GAIN);
     m_ts_offset = (int64_t)obs_data_get_int(settings, P_AUDIO_SYNC_OFFSET) * 1000000ll;
+
+    m_band_aggregation = p_equ(band_aggregation, P_BAND_PEAK) ? BandAggregation::PEAK : BandAggregation::AVERAGE;
 
     m_color_base = { {{(uint8_t)color_base / 255.0f, (uint8_t)(color_base >> 8) / 255.0f, (uint8_t)(color_base >> 16) / 255.0f, (uint8_t)(color_base >> 24) / 255.0f}} };
     m_color_middle = { {{(uint8_t)color_middle / 255.0f, (uint8_t)(color_middle >> 8) / 255.0f, (uint8_t)(color_middle >> 16) / 255.0f, (uint8_t)(color_middle >> 24) / 255.0f}} };
@@ -1509,7 +1518,7 @@ void WAVSource::render_bars([[maybe_unused]] gs_effect_t *effect)
         }
         else
         {
-            if(m_interp_mode != InterpMode::POINT)
+            if((m_band_aggregation == BandAggregation::AVERAGE) && (m_interp_mode != InterpMode::POINT))
             {
 #ifdef ENABLE_X86_SIMD
                 if(HAVE_AVX)
@@ -1520,7 +1529,7 @@ void WAVSource::render_bars([[maybe_unused]] gs_effect_t *effect)
                 apply_interp_filter(m_decibels[channel].get(), m_fft_size / 2, m_band_widths, m_interp_indices, m_interp_kernel, m_interp_bufs[channel]);
 #endif
             }
-            else
+            else if(m_band_aggregation == BandAggregation::AVERAGE)
             {
                 for(auto i = 0; i < m_num_bars; ++i)
                 {
@@ -1529,6 +1538,38 @@ void WAVSource::render_bars([[maybe_unused]] gs_effect_t *effect)
                     for(size_t j = 0; j < count; ++j)
                         sum += m_decibels[channel][(size_t)m_interp_indices[i] + j];
                     m_interp_bufs[channel][i] = sum / (float)count;
+                }
+            }
+            else if(m_interp_mode != InterpMode::POINT)
+            {
+                // Interpolate every FFT bin represented by the bars, then retain
+                // the strongest bin in each band instead of diluting narrow-band
+                // signals by averaging them with quieter neighboring bins.
+#ifdef ENABLE_X86_SIMD
+                if(HAVE_AVX)
+                    apply_interp_filter_fma3(m_decibels[channel].get(), m_fft_size / 2, m_interp_indices, m_interp_kernel, m_interp_bufs[2]);
+                else
+                    apply_interp_filter(m_decibels[channel].get(), m_fft_size / 2, m_interp_indices, m_interp_kernel, m_interp_bufs[2]);
+#else
+                apply_interp_filter(m_decibels[channel].get(), m_fft_size / 2, m_interp_indices, m_interp_kernel, m_interp_bufs[2]);
+#endif
+                for(auto i = 0, k = 0; i < m_num_bars; ++i)
+                {
+                    auto peak = -std::numeric_limits<float>::infinity();
+                    for(auto j = 0; j < m_band_widths[i]; ++j, ++k)
+                        peak = std::max(peak, m_interp_bufs[2][k]);
+                    m_interp_bufs[channel][i] = peak;
+                }
+            }
+            else
+            {
+                for(auto i = 0; i < m_num_bars; ++i)
+                {
+                    auto peak = -std::numeric_limits<float>::infinity();
+                    auto count = (size_t)m_band_widths[i];
+                    for(size_t j = 0; j < count; ++j)
+                        peak = std::max(peak, m_decibels[channel][(size_t)m_interp_indices[i] + j]);
+                    m_interp_bufs[channel][i] = peak;
                 }
             }
 

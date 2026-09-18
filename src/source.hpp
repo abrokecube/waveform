@@ -85,6 +85,12 @@ enum class DisplayMode
     WAVEFORM
 };
 
+enum class BandAggregation
+{
+    AVERAGE,
+    PEAK
+};
+
 enum class ChannelMode
 {
     MONO,
@@ -164,6 +170,7 @@ protected:
     FilterMode m_filter_mode = FilterMode::GAUSS;
     TSmoothingMode m_tsmoothing = TSmoothingMode::EXPONENTIAL;
     DisplayMode m_display_mode = DisplayMode::CURVE;
+    BandAggregation m_band_aggregation = BandAggregation::AVERAGE;
     ChannelMode m_channel_mode = ChannelMode::MONO;
     bool m_stereo = false;
     bool m_auto_fft_size = true;
